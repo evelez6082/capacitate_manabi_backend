@@ -26,6 +26,7 @@ def send_preinscription_confirmation(
     message["Subject"] = "Confirmacion de preinscripcion - Capacitate Manabi"
     message["From"] = formataddr((settings.smtp_from_name, settings.smtp_from_email))
     message["To"] = to_email
+    message["Reply-To"] = settings.support_email
     message.set_content(
         f"""Hola {full_name},
 
@@ -44,9 +45,13 @@ Prefectura de Manabi
     )
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
-            if settings.smtp_use_tls:
+        use_ssl = settings.smtp_use_ssl or settings.smtp_port == 465
+        smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with smtp_class(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+            if settings.smtp_use_tls and not use_ssl:
+                smtp.ehlo()
                 smtp.starttls()
+                smtp.ehlo()
             if settings.smtp_username and settings.smtp_password:
                 smtp.login(settings.smtp_username, settings.smtp_password)
             smtp.send_message(message)

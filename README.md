@@ -35,9 +35,18 @@ SMTP_PASSWORD=tu_app_password
 SMTP_FROM_EMAIL=tu_correo@gmail.com
 SMTP_FROM_NAME=Capacitate Manabi
 SMTP_USE_TLS=true
+SMTP_USE_SSL=false
 ```
 
 Para Gmail se recomienda usar una clave de aplicacion. Si `SMTP_ENABLED=false` o el servidor SMTP falla, la preinscripcion se guarda igual y la respuesta retorna `correo_enviado: false`.
+
+Si tu proveedor usa SSL directo, normalmente la configuracion cambia a:
+
+```bash
+SMTP_PORT=465
+SMTP_USE_TLS=false
+SMTP_USE_SSL=true
+```
 
 ## Ejecutar
 

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     smtp_from_email: str | None = None
     smtp_from_name: str = "Capacitate Manabi"
     smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
     support_email: str = "formacion@manabi.gob.ec"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
