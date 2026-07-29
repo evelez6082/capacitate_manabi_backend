@@ -1,0 +1,5 @@
+fastapi>=0.116
+uvicorn[standard]>=0.35
+psycopg[binary]>=3.2
+pydantic-settings>=2.10
+python-multipart>=0.0.20
