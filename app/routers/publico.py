@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from app.db import fetch_one, get_connection
+from app.db import fetch_all, fetch_one, get_connection
 from app.schemas import PublicRegistrationCreate
 
 router = APIRouter(prefix="/api/public", tags=["publico"])
@@ -67,6 +67,15 @@ def get_or_create_geo(
     return provincia_id, canton_id, parroquia_id
 
 
+def resolve_geo_ids(
+    conn: Connection,
+    payload: PublicRegistrationCreate,
+) -> tuple[int | None, int | None, int | None]:
+    if payload.provincia_id or payload.canton_id or payload.parroquia_id:
+        return payload.provincia_id, payload.canton_id, payload.parroquia_id
+    return get_or_create_geo(conn, payload.provincia, payload.canton, payload.parroquia)
+
+
 def normalize_registration(payload: PublicRegistrationCreate) -> dict[str, Any]:
     return payload.model_dump(mode="json")
 
@@ -100,6 +109,52 @@ def obtener_campana_publica(slug_publico: str, conn: Connection = Depends(get_co
     return row
 
 
+@router.get("/catalogos/provincias")
+def listar_provincias_publicas(conn: Connection = Depends(get_connection)) -> dict:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT id, nombre
+        FROM provincias
+        WHERE activo = true
+        ORDER BY nombre
+        """,
+    )
+    return {"items": rows}
+
+
+@router.get("/catalogos/cantones")
+def listar_cantones_publicos(provincia_id: int, conn: Connection = Depends(get_connection)) -> dict:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT id, nombre
+        FROM cantones
+        WHERE activo = true
+          AND provincia_id = %s
+        ORDER BY nombre
+        """,
+        (provincia_id,),
+    )
+    return {"items": rows}
+
+
+@router.get("/catalogos/parroquias")
+def listar_parroquias_publicas(canton_id: int, conn: Connection = Depends(get_connection)) -> dict:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT id, nombre
+        FROM parroquias
+        WHERE activo = true
+          AND canton_id = %s
+        ORDER BY nombre
+        """,
+        (canton_id,),
+    )
+    return {"items": rows}
+
+
 @router.post("/campanas/{slug_publico}/inscripciones", status_code=201)
 def registrar_inscripcion_publica(
     slug_publico: str,
@@ -126,12 +181,7 @@ def registrar_inscripcion_publica(
     if not cedula or len(cedula) < 10:
         raise HTTPException(status_code=400, detail="Cedula invalida")
 
-    provincia_id, canton_id, parroquia_id = get_or_create_geo(
-        conn,
-        payload.provincia,
-        payload.canton,
-        payload.parroquia,
-    )
+    provincia_id, canton_id, parroquia_id = resolve_geo_ids(conn, payload)
     nacionalidad_id = get_or_create_named(conn, "nacionalidades", payload.nacionalidad)
     raw_data = normalize_registration(payload)
     nombre_completo = f"{payload.nombres} {payload.apellidos}".strip()

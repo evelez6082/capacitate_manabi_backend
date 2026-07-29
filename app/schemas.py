@@ -37,8 +37,11 @@ class PublicRegistrationCreate(BaseModel):
     apellidos: str = Field(min_length=2, max_length=120)
     correo: str = Field(min_length=5, max_length=180)
     celular: str = Field(min_length=7, max_length=30)
+    provincia_id: int | None = None
     provincia: str | None = None
+    canton_id: int | None = None
     canton: str | None = None
+    parroquia_id: int | None = None
     parroquia: str | None = None
     barrio: str | None = None
     actividad: str | None = None
