@@ -155,6 +155,25 @@ def listar_parroquias_publicas(canton_id: int, conn: Connection = Depends(get_co
     return {"items": rows}
 
 
+@router.get("/catalogos/nacionalidades")
+def listar_nacionalidades_publicas(conn: Connection = Depends(get_connection)) -> dict:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT id, nombre
+        FROM nacionalidades
+        WHERE activo = true
+        ORDER BY
+            CASE
+                WHEN lower(nombre) IN ('ecuatoriana', 'ecuador', 'ecuatoriano/a', 'ecuatoriano') THEN 0
+                ELSE 1
+            END,
+            nombre
+        """,
+    )
+    return {"items": rows}
+
+
 @router.post("/campanas/{slug_publico}/inscripciones", status_code=201)
 def registrar_inscripcion_publica(
     slug_publico: str,
@@ -182,7 +201,7 @@ def registrar_inscripcion_publica(
         raise HTTPException(status_code=400, detail="Cedula invalida")
 
     provincia_id, canton_id, parroquia_id = resolve_geo_ids(conn, payload)
-    nacionalidad_id = get_or_create_named(conn, "nacionalidades", payload.nacionalidad)
+    nacionalidad_id = payload.nacionalidad_id or get_or_create_named(conn, "nacionalidades", payload.nacionalidad)
     raw_data = normalize_registration(payload)
     nombre_completo = f"{payload.nombres} {payload.apellidos}".strip()
 

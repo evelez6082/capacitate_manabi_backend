@@ -49,6 +49,7 @@ class PublicRegistrationCreate(BaseModel):
     autoidentificacion: str | None = None
     genero: str | None = None
     orientacion: str | None = None
+    nacionalidad_id: int | None = None
     nacionalidad: str | None = None
     discapacidad: str | None = None
     tipoDiscapacidad: str | None = None
