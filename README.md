@@ -56,6 +56,8 @@ Abre:
 - `GET /api/campanas-inscripcion/{campana_id}/inscripciones`
 - `GET /api/usuarios/roles`
 - `GET /api/usuarios`
+- `GET /api/public/campanas/{slug_publico}`
+- `POST /api/public/campanas/{slug_publico}/inscripciones`
 
 ## Ejemplo de campana
 
@@ -70,3 +72,38 @@ curl -X POST http://localhost:8000/api/campanas-inscripcion \
 ```
 
 La respuesta incluye `slug_publico` y `token_publico`, que luego serviran para construir el link publico de inscripcion.
+
+## Integracion con frontend React
+
+El formulario publico debe enviar los datos a:
+
+```text
+POST /api/public/campanas/{slug_publico}/inscripciones
+```
+
+Ejemplo local:
+
+```bash
+curl -X POST http://localhost:8000/api/public/campanas/liderazgo-espam-001-2026/inscripciones \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cedula": "1234567890",
+    "fechaNac": "1990-01-01",
+    "nombres": "Ana",
+    "apellidos": "Alcivar",
+    "correo": "ana@example.com",
+    "celular": "0999999999",
+    "provincia": "Manabi",
+    "canton": "Portoviejo",
+    "parroquia": "Parroquia urbana",
+    "barrio": "Centro",
+    "actividad": "Estudio",
+    "institucion": "ESPAM",
+    "autoidentificacion": "Mestizo/a",
+    "genero": "Mujer",
+    "nacionalidad": "Ecuatoriana",
+    "discapacidad": "No",
+    "educacion": "Tercer nivel",
+    "acepto": true
+  }'
+```
