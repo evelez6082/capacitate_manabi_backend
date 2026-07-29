@@ -6,6 +6,7 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from app.db import fetch_all, fetch_one, get_connection
+from app.email_service import send_preinscription_confirmation
 from app.schemas import PublicRegistrationCreate
 
 router = APIRouter(prefix="/api/public", tags=["publico"])
@@ -289,9 +290,16 @@ def registrar_inscripcion_publica(
     ).fetchone()
     conn.commit()
 
+    correo_enviado = send_preinscription_confirmation(
+        to_email=payload.correo,
+        full_name=nombre_completo,
+        campaign_name=campaign["nombre"],
+    )
+
     return {
         "message": "Inscripcion registrada correctamente",
         "persona_id": persona_id,
         "inscripcion_id": int(inscripcion["id"]),
         "campana": campaign["nombre"],
+        "correo_enviado": correo_enviado,
     }

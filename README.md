@@ -20,6 +20,25 @@ cp .env.example .env
 
 Edita `.env` y coloca la clave real de PostgreSQL.
 
+## Correo de confirmacion
+
+El backend puede enviar un correo automatico cuando una persona completa la preinscripcion publica.
+
+En `.env`, configura SMTP:
+
+```bash
+SMTP_ENABLED=true
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=tu_correo@gmail.com
+SMTP_PASSWORD=tu_app_password
+SMTP_FROM_EMAIL=tu_correo@gmail.com
+SMTP_FROM_NAME=Capacitate Manabi
+SMTP_USE_TLS=true
+```
+
+Para Gmail se recomienda usar una clave de aplicacion. Si `SMTP_ENABLED=false` o el servidor SMTP falla, la preinscripcion se guarda igual y la respuesta retorna `correo_enviado: false`.
+
 ## Ejecutar
 
 ```bash
