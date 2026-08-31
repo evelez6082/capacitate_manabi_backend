@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     environment: str = "local"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/capacitate_manabi_bd_v2"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    auth_secret_key: str = "change-this-secret-in-production"
+    auth_token_expire_minutes: int = 720
     smtp_enabled: bool = False
     smtp_host: str | None = None
     smtp_port: int = 587
