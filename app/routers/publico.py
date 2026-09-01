@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
@@ -179,6 +179,7 @@ def listar_nacionalidades_publicas(conn: Connection = Depends(get_connection)) -
 def registrar_inscripcion_publica(
     slug_publico: str,
     payload: PublicRegistrationCreate,
+    background_tasks: BackgroundTasks,
     conn: Connection = Depends(get_connection),
 ) -> dict:
     if not payload.acepto:
@@ -290,7 +291,8 @@ def registrar_inscripcion_publica(
     ).fetchone()
     conn.commit()
 
-    correo_enviado = send_preinscription_confirmation(
+    background_tasks.add_task(
+        send_preinscription_confirmation,
         to_email=payload.correo,
         full_name=nombre_completo,
         campaign_name=campaign["nombre"],
@@ -301,5 +303,5 @@ def registrar_inscripcion_publica(
         "persona_id": persona_id,
         "inscripcion_id": int(inscripcion["id"]),
         "campana": campaign["nombre"],
-        "correo_enviado": correo_enviado,
+        "correo_programado": True,
     }
