@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
-from io import StringIO
+from datetime import date, datetime
+from io import BytesIO, StringIO
 from typing import Any
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from psycopg import Connection
 
 from app.db import fetch_all, fetch_one, get_connection
@@ -77,6 +79,57 @@ CONSULTA_WHERE = {
     "en-curso": "i.id IS NOT NULL AND a.id IS NULL AND d.id IS NULL",
     "aprobados-sin-diploma": "a.id IS NOT NULL AND d.id IS NULL",
 }
+
+INSCRIPCIONES_EXPORT_COLUMNS = [
+    "inscripcion_id",
+    "persona_id",
+    "cedula",
+    "nombres",
+    "apellidos",
+    "nombre_completo",
+    "correo_principal",
+    "telefono_principal",
+    "fecha_nacimiento",
+    "genero",
+    "etnia",
+    "nivel_educativo",
+    "discapacidad",
+    "nacionalidad",
+    "provincia",
+    "canton",
+    "parroquia",
+    "sector",
+    "curso",
+    "version_moodle",
+    "campana_inscripcion",
+    "campana_codigo",
+    "campana_slug",
+    "fecha_inscripcion",
+    "modalidad",
+    "ocupacion",
+    "institucion",
+    "estado",
+    "consentimiento",
+    "observacion",
+    "source_file_id",
+    "import_batch_id",
+    "submission_id",
+    "raw_data",
+    "created_at",
+]
+
+MOODLE_EXPORT_COLUMNS = [
+    "username",
+    "password",
+    "firstname",
+    "lastname",
+    "email",
+    "phone1",
+    "country",
+    "timezone",
+    "lang",
+    "cohort1",
+]
 
 
 def normalize_key(value: str | None) -> str:
@@ -196,6 +249,56 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+def serialize_excel_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (dict, list)):
+        import json
+
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def rows_to_xlsx(rows: list[dict[str, Any]], columns: list[str], sheet_name: str) -> BytesIO:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = sheet_name
+    worksheet.append(columns)
+
+    header_fill = PatternFill("solid", fgColor="D9EDE9")
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+
+    for row in rows:
+        worksheet.append([serialize_excel_value(row.get(column)) for column in columns])
+
+    for index, column in enumerate(columns, start=1):
+        max_length = max(len(str(column)), *(len(str(serialize_excel_value(row.get(column)))) for row in rows[:200]))
+        worksheet.column_dimensions[get_column_letter(index)].width = min(max(max_length + 2, 12), 42)
+
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return stream
+
+
+def xlsx_response(stream: BytesIO, filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def inscripciones_base_where(
     anio: int | None,
     mes: int | None,
@@ -257,6 +360,91 @@ def inscripciones_select_sql(where_clause: str) -> str:
         LEFT JOIN parroquias pa ON pa.id = p.parroquia_id
         LEFT JOIN curso_versiones_moodle cv ON cv.id = i.curso_version_id
         LEFT JOIN campanas_inscripcion ci ON ci.id = i.campana_inscripcion_id
+        WHERE {where_clause}
+    """
+
+
+def inscripciones_export_sql(where_clause: str) -> str:
+    return f"""
+        SELECT
+            i.id AS inscripcion_id,
+            p.id AS persona_id,
+            p.cedula,
+            p.nombres,
+            p.apellidos,
+            p.nombre_completo,
+            p.correo_principal,
+            p.telefono_principal,
+            p.fecha_nacimiento,
+            p.genero,
+            p.etnia,
+            p.nivel_educativo,
+            p.discapacidad,
+            n.nombre AS nacionalidad,
+            pr.nombre AS provincia,
+            ct.nombre AS canton,
+            pa.nombre AS parroquia,
+            p.sector,
+            c.nombre AS curso,
+            cv.nombre AS version_moodle,
+            ci.nombre AS campana_inscripcion,
+            ci.codigo AS campana_codigo,
+            ci.slug_publico AS campana_slug,
+            i.fecha_inscripcion,
+            i.modalidad,
+            i.ocupacion,
+            i.institucion,
+            i.estado,
+            i.consentimiento,
+            i.observacion,
+            i.source_file_id,
+            i.import_batch_id,
+            i.submission_id,
+            i.raw_data,
+            i.created_at
+        FROM inscripciones i
+        JOIN personas p ON p.id = i.persona_id
+        JOIN cursos c ON c.id = i.curso_id
+        LEFT JOIN nacionalidades n ON n.id = p.nacionalidad_id
+        LEFT JOIN provincias pr ON pr.id = p.provincia_id
+        LEFT JOIN cantones ct ON ct.id = p.canton_id
+        LEFT JOIN parroquias pa ON pa.id = p.parroquia_id
+        LEFT JOIN curso_versiones_moodle cv ON cv.id = i.curso_version_id
+        LEFT JOIN campanas_inscripcion ci ON ci.id = i.campana_inscripcion_id
+        WHERE {where_clause}
+    """
+
+
+def inscripciones_moodle_sql(where_clause: str) -> str:
+    return f"""
+        SELECT
+            p.cedula AS username,
+            p.cedula AS password,
+            COALESCE(NULLIF(p.nombres, ''), split_part(p.nombre_completo, ' ', 1)) AS firstname,
+            COALESCE(NULLIF(p.apellidos, ''), trim(regexp_replace(p.nombre_completo, '^\\S+\\s*', ''))) AS lastname,
+            p.correo_principal AS email,
+            p.telefono_principal AS phone1,
+            'EC' AS country,
+            'America/Guayaquil' AS timezone,
+            'es' AS lang,
+            COALESCE(cm.codigo, ci.codigo, cv.codigo, ci.slug_publico) AS cohort1
+        FROM inscripciones i
+        JOIN personas p ON p.id = i.persona_id
+        LEFT JOIN curso_versiones_moodle cv ON cv.id = i.curso_version_id
+        LEFT JOIN campanas_inscripcion ci ON ci.id = i.campana_inscripcion_id
+        LEFT JOIN LATERAL (
+            SELECT codigo
+            FROM cohortes_matriculacion cm
+            WHERE (cm.campana_inscripcion_id = i.campana_inscripcion_id)
+               OR (
+                    cm.campana_inscripcion_id IS NULL
+                    AND cm.curso_version_id = i.curso_version_id
+                  )
+            ORDER BY
+                CASE WHEN cm.campana_inscripcion_id = i.campana_inscripcion_id THEN 0 ELSE 1 END,
+                cm.fecha_creacion DESC
+            LIMIT 1
+        ) cm ON true
         WHERE {where_clause}
     """
 
@@ -499,6 +687,54 @@ def listar_inscritos(
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
 
+@router.get("/inscritos/export.xlsx")
+def exportar_inscritos_excel(
+    anio: int | None = Query(default=None, ge=2000, le=2100),
+    mes: int | None = Query(default=None, ge=1, le=12),
+    campana_id: int | None = Query(default=None, ge=1),
+    q: str | None = Query(default=None),
+    conn: Connection = Depends(get_connection),
+    _: dict[str, Any] = Depends(require_roles("admin", "supervisor")),
+) -> StreamingResponse:
+    where_clause, params = inscripciones_base_where(anio, mes, campana_id, q)
+    base_sql = inscripciones_export_sql(where_clause)
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT *
+        FROM ({base_sql}) t
+        ORDER BY fecha_inscripcion DESC NULLS LAST, nombre_completo
+        """,
+        params,
+    )
+    stream = rows_to_xlsx(rows, INSCRIPCIONES_EXPORT_COLUMNS, "inscripciones")
+    return xlsx_response(stream, "capacitate-manabi-inscripciones.xlsx")
+
+
+@router.get("/inscritos/export-moodle.xlsx")
+def exportar_inscritos_moodle_excel(
+    anio: int | None = Query(default=None, ge=2000, le=2100),
+    mes: int | None = Query(default=None, ge=1, le=12),
+    campana_id: int | None = Query(default=None, ge=1),
+    q: str | None = Query(default=None),
+    conn: Connection = Depends(get_connection),
+    _: dict[str, Any] = Depends(require_roles("admin", "supervisor")),
+) -> StreamingResponse:
+    where_clause, params = inscripciones_base_where(anio, mes, campana_id, q)
+    base_sql = inscripciones_moodle_sql(where_clause)
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT *
+        FROM ({base_sql}) t
+        ORDER BY username
+        """,
+        params,
+    )
+    stream = rows_to_xlsx(rows, MOODLE_EXPORT_COLUMNS, "moodle_users")
+    return xlsx_response(stream, "capacitate-manabi-moodle-users.xlsx")
+
+
 @router.get("/inscritos/{persona_id}/detalle")
 def detalle_inscrito(
     persona_id: int,
@@ -511,6 +747,8 @@ def detalle_inscrito(
         SELECT
             p.id,
             p.cedula,
+            p.nombres,
+            p.apellidos,
             p.nombre_completo,
             p.correo_principal,
             p.telefono_principal,
@@ -537,6 +775,37 @@ def detalle_inscrito(
     if not persona:
         raise HTTPException(status_code=404, detail="Inscrito no encontrado")
 
+    inscripciones = fetch_all(
+        conn,
+        """
+        SELECT
+            i.id AS inscripcion_id,
+            c.nombre AS curso,
+            cv.nombre AS version_moodle,
+            ci.nombre AS campana_inscripcion,
+            ci.codigo AS campana_codigo,
+            i.fecha_inscripcion,
+            i.estado,
+            i.modalidad,
+            i.ocupacion,
+            i.institucion,
+            i.consentimiento,
+            i.observacion,
+            i.source_file_id,
+            i.import_batch_id,
+            i.submission_id,
+            i.raw_data,
+            i.created_at
+        FROM inscripciones i
+        JOIN cursos c ON c.id = i.curso_id
+        LEFT JOIN curso_versiones_moodle cv ON cv.id = i.curso_version_id
+        LEFT JOIN campanas_inscripcion ci ON ci.id = i.campana_inscripcion_id
+        WHERE i.persona_id = %s
+        ORDER BY i.fecha_inscripcion DESC NULLS LAST, i.id DESC
+        """,
+        (persona_id,),
+    )
+
     trazabilidad = fetch_all(
         conn,
         """
@@ -547,7 +816,7 @@ def detalle_inscrito(
         """,
         (persona["cedula"],),
     )
-    return {"persona": persona, "trazabilidad": trazabilidad}
+    return {"persona": persona, "inscripciones": inscripciones, "trazabilidad": trazabilidad}
 
 
 @router.get("/aprobados-avance/resumen")
