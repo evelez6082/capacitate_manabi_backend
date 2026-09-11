@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
     support_email: str = "formacion@manabi.gob.ec"
+    whatsapp_reports_enabled: bool = False
+    whatsapp_graph_api_version: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_access_token: str | None = None
+    whatsapp_report_recipient: str | None = None
+    whatsapp_report_template: str = "reporte_inscripciones_diarias"
+    whatsapp_report_template_language: str = "es"
+    whatsapp_report_timezone: str = "America/Guayaquil"
+    daily_report_email_enabled: bool = False
+    daily_report_email_recipient: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

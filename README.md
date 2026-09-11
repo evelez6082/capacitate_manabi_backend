@@ -55,6 +55,8 @@ Servicios locales:
 | `CLIENT_IP_HEADER` | Encabezado de IP, solo detrás de un proxy confiable que lo reemplace. |
 | `SMTP_*` | Envío opcional de confirmaciones. |
 | `RATE_LIMIT_*` | Límites de inscripción por IP, identidad y correo. |
+| `WHATSAPP_*` | Canal WhatsApp de los reportes programados. |
+| `DAILY_REPORT_EMAIL_*` | Canal de correo para los mismos reportes. |
 
 Si SMTP está deshabilitado o falla, la inscripción se conserva y la respuesta indica
 `correo_enviado: false`.
@@ -103,3 +105,54 @@ completo en desarrollo, usa `compose.yaml` del repositorio `capacitate_manabi_fu
 En producción, usa un gestor de secretos, termina TLS en un proxy confiable, restringe
 la red de PostgreSQL y ejecuta las migraciones antes de cambiar el tráfico a la nueva
 versión.
+
+## Reportes diarios por WhatsApp y correo
+
+La API incluye un comando idempotente para reportar nuevos inscritos del día y el total
+acumulado por WhatsApp y correo. Ambos canales se registran por separado, por lo que el
+fallo de uno no duplica ni impide el otro. Los mensajes proactivos de WhatsApp usan una
+plantilla de WhatsApp Business aprobada por Meta. Crea una plantilla de utilidad llamada
+`reporte_inscripciones_diarias`, idioma español, con este cuerpo y en este orden:
+
+```text
+Reporte {{1}} de Capacítate Manabí. Nuevos inscritos hoy: {{2}}.
+Total acumulado: {{3}}. Corte: {{4}}.
+```
+
+La solicitud se envía al endpoint `/messages` siguiendo la
+[colección oficial de WhatsApp Cloud API](https://www.postman.com/meta/whatsapp-business-platform/documentation/wlk6lh4/whatsapp-cloud-api).
+Completa las variables `WHATSAPP_*` de `.env`; el receptor debe usar formato
+internacional sin `+`, espacios ni guiones. Consulta en Meta la versión vigente de Graph
+API y configúrala explícitamente, por ejemplo con el formato `vNN.N`. Luego aplica
+`migracion_reportes_whatsapp.sql` y prueba manualmente, una sola vez por franja:
+
+Para recibirlo también por correo, configura SMTP, establece
+`DAILY_REPORT_EMAIL_ENABLED=true` y define `DAILY_REPORT_EMAIL_RECIPIENT`. Puedes activar
+uno o ambos canales.
+
+```bash
+python scripts/send_whatsapp_report.py --slot inicio
+python scripts/send_whatsapp_report.py --slot mediodia
+python scripts/send_whatsapp_report.py --slot fin
+```
+
+En Linux, ejecuta `crontab -e` con el mismo usuario del servicio. Esta programación usa
+08:00 como inicio, 12:00 como mediodía y 18:00 como cierre:
+
+```cron
+CRON_TZ=America/Guayaquil
+0 8 * * * cd /ruta/capacitate_manabi_backend && .venv/bin/python scripts/send_whatsapp_report.py --slot inicio
+0 12 * * * cd /ruta/capacitate_manabi_backend && .venv/bin/python scripts/send_whatsapp_report.py --slot mediodia
+0 18 * * * cd /ruta/capacitate_manabi_backend && .venv/bin/python scripts/send_whatsapp_report.py --slot fin
+```
+
+Si el backend corre con Compose, sustituye cada comando programado por su equivalente:
+
+```bash
+docker compose exec -T api python scripts/send_whatsapp_report.py --slot inicio
+docker compose exec -T api python scripts/send_whatsapp_report.py --slot mediodia
+docker compose exec -T api python scripts/send_whatsapp_report.py --slot fin
+```
+
+La tabla `daily_report_deliveries` evita repeticiones ordinarias y conserva los
+errores para reintentos.

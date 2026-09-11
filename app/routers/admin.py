@@ -610,6 +610,44 @@ def inscripciones_territorio(
     }
 
 
+@router.get("/metricas/cantones-manabi")
+def metricas_cantones_manabi(
+    conn: Connection = Depends(get_connection),
+    _: dict[str, Any] = Depends(require_roles("admin", "supervisor")),
+) -> dict[str, Any]:
+    """Devuelve todos los cantones de Manabí, incluso los que no tienen registros."""
+    items = fetch_all(
+        conn,
+        """
+        SELECT
+            c.id AS canton_id,
+            c.nombre,
+            count(DISTINCT i.persona_id)::int AS inscritos,
+            count(DISTINCT mm.persona_id)::int AS matriculados,
+            count(DISTINCT a.persona_id) FILTER (WHERE a.estado = 'aprobado')::int AS aprobados,
+            CASE
+                WHEN count(DISTINCT i.persona_id) = 0 THEN 0
+                ELSE round(
+                    100.0 * count(DISTINCT a.persona_id) FILTER (WHERE a.estado = 'aprobado')
+                    / count(DISTINCT i.persona_id),
+                    1
+                )
+            END AS tasa_aprobacion
+        FROM cantones c
+        JOIN provincias pr ON pr.id = c.provincia_id
+        LEFT JOIN personas p ON p.canton_id = c.id
+        LEFT JOIN inscripciones i ON i.persona_id = p.id
+        LEFT JOIN matriculas_moodle mm ON mm.persona_id = p.id
+        LEFT JOIN aprobaciones a ON a.persona_id = p.id
+        WHERE lower(pr.nombre) IN ('manabi', 'manabí')
+          AND c.activo = true
+        GROUP BY c.id, c.nombre
+        ORDER BY c.nombre
+        """,
+    )
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/inscritos/resumen")
 def resumen_inscritos(
     agrupar_por: str = Query(default="anio", pattern="^(anio|mes|cohorte)$"),

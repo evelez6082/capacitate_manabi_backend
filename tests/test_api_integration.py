@@ -115,6 +115,28 @@ class FakeDatabase:
             ]
             return FakeCursor(many=rows)
 
+        if "FROM cantones c JOIN provincias pr" in sql:
+            return FakeCursor(
+                many=[
+                    {
+                        "canton_id": 1,
+                        "nombre": "24 de Mayo",
+                        "inscritos": 0,
+                        "matriculados": 0,
+                        "aprobados": 0,
+                        "tasa_aprobacion": 0,
+                    },
+                    {
+                        "canton_id": 2,
+                        "nombre": "Manta",
+                        "inscritos": 3,
+                        "matriculados": 2,
+                        "aprobados": 1,
+                        "tasa_aprobacion": 33.3,
+                    },
+                ]
+            )
+
         raise AssertionError(f"Consulta no simulada: {sql[:160]}")
 
     def commit(self) -> None:
@@ -200,6 +222,17 @@ class ApiIntegrationTests(unittest.TestCase):
         allowed = self.client.get("/api/usuarios", headers=self.auth_header(1, ["admin"]))
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(len(allowed.json()["items"]), 3)
+
+    def test_canton_metrics_include_territories_without_registrations(self) -> None:
+        response = self.client.get(
+            "/api/admin/metricas/cantones-manabi",
+            headers=self.auth_header(1, ["admin"]),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 2)
+        self.assertEqual(response.json()["items"][0]["nombre"], "24 de Mayo")
+        self.assertEqual(response.json()["items"][0]["inscritos"], 0)
+        self.assertEqual(response.json()["items"][1]["tasa_aprobacion"], 33.3)
 
     def test_public_registration_succeeds_once_and_rejects_replay(self) -> None:
         token = self.new_form_token()

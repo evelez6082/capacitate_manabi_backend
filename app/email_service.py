@@ -88,6 +88,60 @@ def _email_shell(*, banner_url: str, footer_url: str, body_html: str) -> str:
 """
 
 
+def send_daily_registration_report(
+    *,
+    to_email: str,
+    slot_label: str,
+    nuevos_hoy: int,
+    total_inscritos: int,
+    cutoff_label: str,
+) -> bool:
+    message = _build_message(
+        to_email=to_email,
+        subject=f"Reporte {slot_label} de inscripciones",
+    )
+    message.set_content(
+        f"""Reporte {slot_label} de Capacítate Manabí
+
+Nuevos inscritos hoy: {nuevos_hoy}
+Total acumulado: {total_inscritos}
+Corte: {cutoff_label}
+"""
+    )
+    message.add_alternative(
+        _email_shell(
+            banner_url=BANNER_PREINSCRIPCION_URL,
+            footer_url=FOOTER_PREINSCRIPCION_URL,
+            body_html=f"""
+              <h1 style="margin:0;color:#00AA99;font-size:28px;line-height:1.2;font-weight:700;">
+                Reporte {escape(slot_label)}
+              </h1>
+              <p style="font-size:17px;line-height:1.7;margin:20px 0;color:#374151;">
+                Corte: <strong>{escape(cutoff_label)}</strong>
+              </p>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:12px;">
+                <tr>
+                  <td style="padding:22px;background:#ecfdf5;border-radius:14px;text-align:center;">
+                    <div style="font-size:34px;font-weight:700;color:#00897B;">{nuevos_hoy}</div>
+                    <div style="font-size:14px;color:#5B6470;">Nuevos inscritos hoy</div>
+                  </td>
+                  <td style="padding:22px;background:#eff6ff;border-radius:14px;text-align:center;">
+                    <div style="font-size:34px;font-weight:700;color:#1565C0;">{total_inscritos}</div>
+                    <div style="font-size:14px;color:#5B6470;">Total acumulado</div>
+                  </td>
+                </tr>
+              </table>
+            """,
+        ),
+        subtype="html",
+    )
+    return _send_message(
+        message,
+        to_email=to_email,
+        error_label="No se pudo enviar el reporte diario de inscripciones",
+    )
+
+
 def send_preinscription_confirmation(
     *,
     to_email: str,
