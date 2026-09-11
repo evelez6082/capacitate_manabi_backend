@@ -191,6 +191,7 @@ def run_report(
             ) AS nuevos_hoy,
             count(DISTINCT persona_id) AS total_inscritos
         FROM inscripciones
+        WHERE estado IN ('registrada', 'validada')
         """,
         (settings.whatsapp_report_timezone, report_date),
     ).fetchone()

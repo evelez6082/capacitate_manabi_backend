@@ -156,3 +156,14 @@ docker compose exec -T api python scripts/send_whatsapp_report.py --slot fin
 
 La tabla `daily_report_deliveries` evita repeticiones ordinarias y conserva los
 errores para reintentos.
+
+## Baja administrativa de inscripciones
+
+Los administradores pueden marcar una inscripción como `rechazada` o `cancelada` desde
+el panel de inscritos. Es una baja lógica: conserva la persona, el motivo, el usuario
+responsable, la fecha y la auditoría. Una inscripción con matrícula, aprobación o
+diploma asociado no puede darse de baja hasta resolver primero esa trazabilidad.
+
+En instalaciones existentes aplica `migracion_gestion_inscripciones.sql` antes de
+desplegar esta versión. Las inscripciones rechazadas o canceladas dejan de participar en
+métricas, reportes diarios y exportaciones operativas.

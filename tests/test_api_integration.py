@@ -38,6 +38,8 @@ class FakeDatabase:
         self.existing_identity = False
         self.person_insert_count = 0
         self.registration_insert_count = 0
+        self.registration_status = "registrada"
+        self.audit_insert_count = 0
         self.commits = 0
 
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> FakeCursor:
@@ -99,6 +101,35 @@ class FakeDatabase:
         if "INSERT INTO inscripciones" in sql:
             self.registration_insert_count += 1
             return FakeCursor(one={"id": 501})
+
+        if "FROM inscripciones i JOIN personas p" in sql and "FOR UPDATE OF i" in sql:
+            return FakeCursor(
+                one={
+                    "id": 501,
+                    "estado": self.registration_status,
+                    "persona_id": 99,
+                    "nombre_completo": "Ana María Vera López",
+                    "tiene_matriculacion": False,
+                    "tiene_aprobacion": False,
+                    "tiene_diploma": False,
+                }
+            )
+
+        if sql.startswith("UPDATE inscripciones SET estado = %s"):
+            self.registration_status = str(params[0])
+            return FakeCursor(
+                one={
+                    "inscripcion_id": int(params[3]),
+                    "persona_id": 99,
+                    "estado": self.registration_status,
+                    "estado_motivo": params[1],
+                    "estado_actualizado_at": datetime.now(timezone.utc),
+                }
+            )
+
+        if sql.startswith("INSERT INTO auditoria_acciones"):
+            self.audit_insert_count += 1
+            return FakeCursor()
 
         if "FROM usuarios u" in sql and "ORDER BY u.created_at DESC" in sql:
             rows = [
@@ -176,13 +207,16 @@ class ApiIntegrationTests(unittest.TestCase):
         self.settings = get_settings()
         self.original_min_seconds = self.settings.public_form_min_seconds
         self.original_ip_attempts = self.settings.rate_limit_ip_attempts
+        self.original_smtp_enabled = self.settings.smtp_enabled
         self.settings.public_form_min_seconds = 0
+        self.settings.smtp_enabled = False
 
     def tearDown(self) -> None:
         self.client.close()
         app.dependency_overrides.clear()
         self.settings.public_form_min_seconds = self.original_min_seconds
         self.settings.rate_limit_ip_attempts = self.original_ip_attempts
+        self.settings.smtp_enabled = self.original_smtp_enabled
 
     def auth_header(self, user_id: int, roles: list[str]) -> dict[str, str]:
         token = create_access_token(str(user_id), roles)
@@ -233,6 +267,25 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(response.json()["items"][0]["nombre"], "24 de Mayo")
         self.assertEqual(response.json()["items"][0]["inscritos"], 0)
         self.assertEqual(response.json()["items"][1]["tasa_aprobacion"], 33.3)
+
+    def test_only_admin_can_reject_or_cancel_registration(self) -> None:
+        payload = {"estado": "rechazada", "motivo": "Documento de identidad incorrecto"}
+        forbidden = self.client.patch(
+            "/api/admin/inscritos/inscripciones/501/estado",
+            headers=self.auth_header(3, ["supervisor"]),
+            json=payload,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        updated = self.client.patch(
+            "/api/admin/inscritos/inscripciones/501/estado",
+            headers=self.auth_header(1, ["admin"]),
+            json=payload,
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["item"]["estado"], "rechazada")
+        self.assertEqual(self.database.registration_status, "rechazada")
+        self.assertEqual(self.database.audit_insert_count, 1)
 
     def test_public_registration_succeeds_once_and_rejects_replay(self) -> None:
         token = self.new_form_token()

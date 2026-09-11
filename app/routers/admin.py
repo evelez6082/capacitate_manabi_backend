@@ -3,12 +3,14 @@ from __future__ import annotations
 import csv
 from datetime import date, datetime
 from io import BytesIO, StringIO
-from typing import Any
+from typing import Any, Literal
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from psycopg import Connection
+from psycopg.types.json import Jsonb
+from pydantic import BaseModel, Field
 
 from app.db import fetch_all, fetch_one, get_connection
 from app.security import require_roles
@@ -18,6 +20,11 @@ router = APIRouter(
     tags=["admin"],
     dependencies=[Depends(require_roles("admin", "supervisor"))],
 )
+
+
+class InscripcionEstadoUpdate(BaseModel):
+    estado: Literal["rechazada", "cancelada"]
+    motivo: str = Field(min_length=5, max_length=500)
 
 CANTON_COORDS = {
     "24 de mayo": (-1.2798, -80.4182),
@@ -77,7 +84,7 @@ CONSULTA_LABELS = {
 }
 
 CONSULTA_WHERE = {
-    "inscritos": "i.id IS NOT NULL",
+    "inscritos": "i.id IS NOT NULL AND i.estado IN ('registrada', 'validada')",
     "aprobados": "a.id IS NOT NULL",
     "con-diploma": "d.id IS NOT NULL",
     "en-curso": "i.id IS NOT NULL AND a.id IS NULL AND d.id IS NULL",
@@ -353,6 +360,8 @@ def inscripciones_select_sql(where_clause: str) -> str:
             ci.nombre AS campana_inscripcion,
             i.fecha_inscripcion,
             i.estado,
+            i.estado_motivo,
+            i.estado_actualizado_at,
             i.modalidad,
             i.ocupacion,
             i.institucion
@@ -534,7 +543,10 @@ def resumen_admin(
 ) -> dict[str, Any]:
     return {
         "personas": fetch_one(conn, "SELECT count(*) AS total FROM personas")["total"],
-        "inscripciones": fetch_one(conn, "SELECT count(*) AS total FROM inscripciones")["total"],
+        "inscripciones": fetch_one(
+            conn,
+            "SELECT count(*) AS total FROM inscripciones WHERE estado IN ('registrada', 'validada')",
+        )["total"],
         "campanas_activas": fetch_one(
             conn,
             "SELECT count(*) AS total FROM campanas_inscripcion WHERE estado = 'activa'",
@@ -548,6 +560,7 @@ def resumen_admin(
                 FROM inscripciones i
                 JOIN personas p ON p.id = i.persona_id
                 WHERE p.canton_id IS NOT NULL
+                  AND i.estado IN ('registrada', 'validada')
             ) t
             """,
         )["total"],
@@ -573,6 +586,7 @@ def inscripciones_territorio(
         LEFT JOIN provincias pr ON pr.id = p.provincia_id
         LEFT JOIN cantones c ON c.id = p.canton_id
         LEFT JOIN parroquias pa ON pa.id = p.parroquia_id
+        WHERE i.estado IN ('registrada', 'validada')
         GROUP BY pr.nombre, c.nombre, p.parroquia_id, pa.nombre
         ORDER BY total DESC, provincia, canton, parroquia
         """,
@@ -636,9 +650,15 @@ def metricas_cantones_manabi(
         FROM cantones c
         JOIN provincias pr ON pr.id = c.provincia_id
         LEFT JOIN personas p ON p.canton_id = c.id
-        LEFT JOIN inscripciones i ON i.persona_id = p.id
-        LEFT JOIN matriculas_moodle mm ON mm.persona_id = p.id
-        LEFT JOIN aprobaciones a ON a.persona_id = p.id
+        LEFT JOIN inscripciones i
+          ON i.persona_id = p.id
+         AND i.estado IN ('registrada', 'validada')
+        LEFT JOIN matriculas_moodle mm
+          ON mm.persona_id = p.id
+         AND mm.curso_version_id = i.curso_version_id
+        LEFT JOIN aprobaciones a
+          ON a.persona_id = p.id
+         AND a.curso_id = i.curso_id
         WHERE lower(pr.nombre) IN ('manabi', 'manabí')
           AND c.activo = true
         GROUP BY c.id, c.nombre
@@ -664,6 +684,7 @@ def resumen_inscritos(
                 COALESCE(EXTRACT(YEAR FROM fecha_inscripcion)::int::text, 'Sin fecha') AS nombre,
                 count(*)::int AS total
             FROM inscripciones
+            WHERE estado IN ('registrada', 'validada')
             GROUP BY EXTRACT(YEAR FROM fecha_inscripcion)::int
             ORDER BY anio DESC NULLS LAST
             """,
@@ -679,6 +700,7 @@ def resumen_inscritos(
                 COALESCE(to_char(date_trunc('month', fecha_inscripcion), 'TMMonth YYYY'), 'Sin fecha') AS nombre,
                 count(*)::int AS total
             FROM inscripciones
+            WHERE estado IN ('registrada', 'validada')
             GROUP BY date_trunc('month', fecha_inscripcion), EXTRACT(YEAR FROM fecha_inscripcion)::int, EXTRACT(MONTH FROM fecha_inscripcion)::int
             ORDER BY date_trunc('month', fecha_inscripcion) DESC NULLS LAST
             """,
@@ -695,6 +717,7 @@ def resumen_inscritos(
                 max(i.fecha_inscripcion) AS ultima_inscripcion
             FROM inscripciones i
             LEFT JOIN campanas_inscripcion ci ON ci.id = i.campana_inscripcion_id
+            WHERE i.estado IN ('registrada', 'validada')
             GROUP BY ci.id, ci.nombre
             ORDER BY ultima_inscripcion DESC NULLS LAST, total DESC
             """,
@@ -729,6 +752,82 @@ def listar_inscritos(
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
 
+@router.patch("/inscritos/inscripciones/{inscripcion_id}/estado")
+def cambiar_estado_inscripcion(
+    inscripcion_id: int,
+    payload: InscripcionEstadoUpdate,
+    conn: Connection = Depends(get_connection),
+    current_user: dict[str, Any] = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    motivo = " ".join(payload.motivo.split())
+    current = conn.execute(
+        """
+        SELECT
+            i.id,
+            i.estado,
+            i.persona_id,
+            p.nombre_completo,
+            EXISTS (
+                SELECT 1 FROM cohorte_matriculacion_estudiantes cme
+                WHERE cme.inscripcion_id = i.id AND cme.estado = 'matriculado'
+            ) AS tiene_matriculacion,
+            EXISTS (
+                SELECT 1 FROM aprobaciones a
+                WHERE a.persona_id = i.persona_id
+                  AND a.curso_id = i.curso_id
+                  AND a.estado = 'aprobado'
+            ) AS tiene_aprobacion,
+            EXISTS (
+                SELECT 1 FROM diplomas d
+                WHERE d.persona_id = i.persona_id
+                  AND d.curso_id = i.curso_id
+                  AND d.estado <> 'anulado'
+            ) AS tiene_diploma
+        FROM inscripciones i
+        JOIN personas p ON p.id = i.persona_id
+        WHERE i.id = %s
+        FOR UPDATE OF i
+        """,
+        (inscripcion_id,),
+    ).fetchone()
+    if not current:
+        raise HTTPException(status_code=404, detail="Inscripcion no encontrada")
+    if current["estado"] in {"rechazada", "cancelada"}:
+        raise HTTPException(status_code=409, detail="La inscripcion ya fue dada de baja")
+    if current["tiene_matriculacion"] or current["tiene_aprobacion"] or current["tiene_diploma"]:
+        raise HTTPException(
+            status_code=409,
+            detail="No se puede dar de baja porque ya tiene matriculacion, aprobacion o diploma asociado",
+        )
+
+    updated = conn.execute(
+        """
+        UPDATE inscripciones
+        SET estado = %s,
+            estado_motivo = %s,
+            estado_actualizado_at = now(),
+            estado_actualizado_por_usuario_id = %s
+        WHERE id = %s
+        RETURNING id AS inscripcion_id, persona_id, estado, estado_motivo, estado_actualizado_at
+        """,
+        (payload.estado, motivo, current_user["id"], inscripcion_id),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO auditoria_acciones (usuario_id, accion, entidad_tipo, entidad_id, detalle)
+        VALUES (%s, %s, 'inscripcion', %s, %s)
+        """,
+        (
+            current_user["id"],
+            f"inscripcion_{payload.estado}",
+            inscripcion_id,
+            Jsonb({"estado_anterior": current["estado"], "estado_nuevo": payload.estado, "motivo": motivo}),
+        ),
+    )
+    conn.commit()
+    return {"message": "Estado de inscripcion actualizado", "item": dict(updated)}
+
+
 @router.get("/inscritos/export.xlsx")
 def exportar_inscritos_excel(
     anio: int | None = Query(default=None, ge=2000, le=2100),
@@ -739,7 +838,7 @@ def exportar_inscritos_excel(
     _: dict[str, Any] = Depends(require_roles("admin", "supervisor")),
 ) -> StreamingResponse:
     where_clause, params = inscripciones_base_where(anio, mes, campana_id, q)
-    base_sql = inscripciones_export_sql(where_clause)
+    base_sql = inscripciones_export_sql(f"({where_clause}) AND i.estado IN ('registrada', 'validada')")
     rows = fetch_all(
         conn,
         f"""
@@ -763,7 +862,7 @@ def exportar_inscritos_moodle_excel(
     _: dict[str, Any] = Depends(require_roles("admin", "supervisor")),
 ) -> StreamingResponse:
     where_clause, params = inscripciones_base_where(anio, mes, campana_id, q)
-    base_sql = inscripciones_moodle_sql(where_clause)
+    base_sql = inscripciones_moodle_sql(f"({where_clause}) AND i.estado IN ('registrada', 'validada')")
     rows = fetch_all(
         conn,
         f"""
@@ -828,6 +927,8 @@ def detalle_inscrito(
             ci.codigo AS campana_codigo,
             i.fecha_inscripcion,
             i.estado,
+            i.estado_motivo,
+            i.estado_actualizado_at,
             i.modalidad,
             i.ocupacion,
             i.institucion,
