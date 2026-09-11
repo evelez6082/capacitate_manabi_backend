@@ -3,9 +3,14 @@ from psycopg import Connection
 
 from app.db import execute_one, fetch_all, fetch_one, get_connection
 from app.schemas import CampaignCreate
+from app.security import require_roles
 from app.utils import public_token, slugify
 
-router = APIRouter(prefix="/api/campanas-inscripcion", tags=["campanas de inscripcion"])
+router = APIRouter(
+    prefix="/api/campanas-inscripcion",
+    tags=["campanas de inscripcion"],
+    dependencies=[Depends(require_roles("admin", "supervisor", "operador_inscripciones"))],
+)
 
 
 @router.get("")
@@ -46,7 +51,11 @@ def listar_campanas(
 
 
 @router.post("", status_code=201)
-def crear_campana(payload: CampaignCreate, conn: Connection = Depends(get_connection)) -> dict:
+def crear_campana(
+    payload: CampaignCreate,
+    conn: Connection = Depends(get_connection),
+    _: dict = Depends(require_roles("admin", "operador_inscripciones")),
+) -> dict:
     curso = fetch_one(conn, "SELECT id FROM cursos WHERE id = %s", (payload.curso_id,))
     if not curso:
         raise HTTPException(status_code=400, detail="Curso no existe")

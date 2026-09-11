@@ -1,15 +1,122 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from app.anti_automation import InvalidFormChallenge, issue_form_challenge, private_fingerprint, verify_form_challenge
+from app.config import get_settings
 from app.db import fetch_all, fetch_one, get_connection
 from app.email_service import send_preinscription_confirmation
 from app.schemas import PublicRegistrationCreate
 
 router = APIRouter(prefix="/api/public", tags=["publico"])
+
+
+def get_client_ip(request: Request) -> str:
+    settings = get_settings()
+    if settings.client_ip_header:
+        forwarded = request.headers.get(settings.client_ip_header)
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def increment_rate_limit(
+    conn: Connection,
+    scope: str,
+    raw_key: str,
+    limit: int,
+    window_seconds: int,
+    now: datetime,
+) -> None:
+    settings = get_settings()
+    epoch = int(now.timestamp())
+    window_epoch = epoch - (epoch % window_seconds)
+    window_start = datetime.fromtimestamp(window_epoch, timezone.utc)
+    expires_at = datetime.fromtimestamp(window_epoch + window_seconds * 2, timezone.utc)
+    result = conn.execute(
+        """
+        INSERT INTO public_submission_rate_limits (
+            scope, key_hash, window_started_at, request_count, expires_at
+        )
+        VALUES (%s, %s, %s, 1, %s)
+        ON CONFLICT (scope, key_hash, window_started_at) DO UPDATE SET
+            request_count = public_submission_rate_limits.request_count + 1,
+            expires_at = EXCLUDED.expires_at
+        RETURNING request_count
+        """,
+        (scope, private_fingerprint(raw_key, settings.auth_secret_key), window_start, expires_at),
+    ).fetchone()
+    if result and int(result["request_count"]) > limit:
+        conn.commit()
+        retry_after = max(1, window_epoch + window_seconds - epoch)
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiados intentos. Espera antes de volver a enviar el formulario.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def enforce_anti_automation(request: Request, payload: PublicRegistrationCreate, conn: Connection) -> None:
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    try:
+        challenge = verify_form_challenge(
+            payload.form_token,
+            settings.auth_secret_key,
+            settings.public_form_min_seconds,
+            settings.public_form_max_seconds,
+            int(now.timestamp()),
+        )
+    except InvalidFormChallenge as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    increment_rate_limit(
+        conn,
+        "ip",
+        get_client_ip(request),
+        settings.rate_limit_ip_attempts,
+        settings.rate_limit_ip_window_seconds,
+        now,
+    )
+    increment_rate_limit(
+        conn,
+        "identity",
+        payload.cedula,
+        settings.rate_limit_identity_attempts,
+        settings.rate_limit_identity_window_seconds,
+        now,
+    )
+    increment_rate_limit(
+        conn,
+        "email",
+        payload.correo,
+        settings.rate_limit_email_attempts,
+        settings.rate_limit_email_window_seconds,
+        now,
+    )
+
+    challenge_hash = private_fingerprint(payload.form_token, settings.auth_secret_key)
+    consumed = conn.execute(
+        """
+        INSERT INTO used_public_form_challenges (token_hash, issued_at, expires_at)
+        VALUES (%s, to_timestamp(%s), to_timestamp(%s))
+        ON CONFLICT (token_hash) DO NOTHING
+        RETURNING token_hash
+        """,
+        (
+            challenge_hash,
+            int(challenge["iat"]),
+            int(challenge["iat"]) + settings.public_form_max_seconds,
+        ),
+    ).fetchone()
+    conn.commit()
+    if not consumed:
+        raise HTTPException(status_code=409, detail="El formulario ya fue enviado. Recarga la página para intentarlo nuevamente.")
+    if payload.website:
+        raise HTTPException(status_code=400, detail="No se pudo validar el formulario")
 
 
 def digits_only(value: str | None) -> str | None:
@@ -19,66 +126,48 @@ def digits_only(value: str | None) -> str | None:
     return digits or None
 
 
-def get_or_create_named(conn: Connection, table: str, value: str | None) -> int | None:
-    if not value:
-        return None
-    row = conn.execute(
-        f"""
-        INSERT INTO {table} (nombre)
-        VALUES (%s)
-        ON CONFLICT (nombre) DO UPDATE SET activo = true
-        RETURNING id
+def validate_catalog_ids(conn: Connection, payload: PublicRegistrationCreate) -> None:
+    validation = fetch_one(
+        conn,
+        """
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM parroquias pa
+                JOIN cantones ca ON ca.id = pa.canton_id
+                JOIN provincias pr ON pr.id = ca.provincia_id
+                WHERE pr.id = %s
+                  AND ca.id = %s
+                  AND pa.id = %s
+                  AND pr.activo = true
+                  AND ca.activo = true
+                  AND pa.activo = true
+            ) AS ubicacion_valida,
+            EXISTS (
+                SELECT 1
+                FROM nacionalidades n
+                WHERE n.id = %s AND n.activo = true
+            ) AS nacionalidad_valida
         """,
-        (value,),
-    ).fetchone()
-    return int(row["id"]) if row else None
-
-
-def get_or_create_geo(
-    conn: Connection,
-    provincia: str | None,
-    canton: str | None,
-    parroquia: str | None,
-) -> tuple[int | None, int | None, int | None]:
-    provincia_id = get_or_create_named(conn, "provincias", provincia)
-    canton_id = None
-    parroquia_id = None
-    if provincia_id and canton:
-        row = conn.execute(
-            """
-            INSERT INTO cantones (provincia_id, nombre)
-            VALUES (%s, %s)
-            ON CONFLICT (provincia_id, nombre) DO UPDATE SET activo = true
-            RETURNING id
-            """,
-            (provincia_id, canton),
-        ).fetchone()
-        canton_id = int(row["id"]) if row else None
-    if canton_id and parroquia:
-        row = conn.execute(
-            """
-            INSERT INTO parroquias (canton_id, nombre)
-            VALUES (%s, %s)
-            ON CONFLICT (canton_id, nombre) DO UPDATE SET activo = true
-            RETURNING id
-            """,
-            (canton_id, parroquia),
-        ).fetchone()
-        parroquia_id = int(row["id"]) if row else None
-    return provincia_id, canton_id, parroquia_id
-
-
-def resolve_geo_ids(
-    conn: Connection,
-    payload: PublicRegistrationCreate,
-) -> tuple[int | None, int | None, int | None]:
-    if payload.provincia_id or payload.canton_id or payload.parroquia_id:
-        return payload.provincia_id, payload.canton_id, payload.parroquia_id
-    return get_or_create_geo(conn, payload.provincia, payload.canton, payload.parroquia)
+        (payload.provincia_id, payload.canton_id, payload.parroquia_id, payload.nacionalidad_id),
+    )
+    if not validation or not validation["ubicacion_valida"]:
+        raise HTTPException(status_code=422, detail="La provincia, el cantón y la parroquia no forman una ubicación válida")
+    if not validation["nacionalidad_valida"]:
+        raise HTTPException(status_code=422, detail="La nacionalidad seleccionada no es válida")
 
 
 def normalize_registration(payload: PublicRegistrationCreate) -> dict[str, Any]:
-    return payload.model_dump(mode="json")
+    return payload.model_dump(mode="json", exclude={"form_token", "website"})
+
+
+@router.get("/form-challenge")
+def form_challenge() -> dict[str, str | int]:
+    settings = get_settings()
+    return {
+        "form_token": issue_form_challenge(settings.auth_secret_key),
+        "expires_in": settings.public_form_max_seconds,
+    }
 
 
 @router.get("/campanas/{slug_publico}")
@@ -180,15 +269,18 @@ def registrar_inscripcion_publica(
     slug_publico: str,
     payload: PublicRegistrationCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     conn: Connection = Depends(get_connection),
 ) -> dict:
     if not payload.acepto:
         raise HTTPException(status_code=400, detail="Debes aceptar los terminos para inscribirte")
 
+    enforce_anti_automation(request, payload, conn)
+
     campaign = fetch_one(
         conn,
         """
-        SELECT id, curso_id, curso_version_id, nombre, estado
+        SELECT id, curso_id, curso_version_id, nombre, estado, fecha_inicio, fecha_fin
         FROM campanas_inscripcion
         WHERE slug_publico = %s
         """,
@@ -196,14 +288,27 @@ def registrar_inscripcion_publica(
     )
     if not campaign or campaign["estado"] != "activa":
         raise HTTPException(status_code=404, detail="Campana no disponible")
+    now = datetime.now(timezone.utc)
+    if campaign["fecha_inicio"] and now < campaign["fecha_inicio"]:
+        raise HTTPException(status_code=422, detail="La campaña de inscripción todavía no ha iniciado")
+    if campaign["fecha_fin"] and now > campaign["fecha_fin"]:
+        raise HTTPException(status_code=422, detail="La campaña de inscripción ha finalizado")
 
     cedula = digits_only(payload.cedula)
     telefono = digits_only(payload.celular)
     if not cedula or len(cedula) < 10:
         raise HTTPException(status_code=400, detail="Cedula invalida")
 
-    provincia_id, canton_id, parroquia_id = resolve_geo_ids(conn, payload)
-    nacionalidad_id = payload.nacionalidad_id or get_or_create_named(conn, "nacionalidades", payload.nacionalidad)
+    existing_person = fetch_one(conn, "SELECT id FROM personas WHERE cedula = %s", (cedula,))
+    if existing_person:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una persona registrada con esta cedula. Contacta a soporte para actualizar tus datos.",
+        )
+
+    validate_catalog_ids(conn, payload)
+    provincia_id, canton_id, parroquia_id = payload.provincia_id, payload.canton_id, payload.parroquia_id
+    nacionalidad_id = payload.nacionalidad_id
     raw_data = normalize_registration(payload)
     nombre_completo = f"{payload.nombres} {payload.apellidos}".strip()
 
@@ -215,24 +320,7 @@ def registrar_inscripcion_publica(
             provincia_id, canton_id, parroquia_id, sector, datos_extra
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (cedula) DO UPDATE SET
-            nombres = COALESCE(EXCLUDED.nombres, personas.nombres),
-            apellidos = COALESCE(EXCLUDED.apellidos, personas.apellidos),
-            nombre_completo = COALESCE(EXCLUDED.nombre_completo, personas.nombre_completo),
-            correo_principal = COALESCE(EXCLUDED.correo_principal, personas.correo_principal),
-            telefono_principal = COALESCE(EXCLUDED.telefono_principal, personas.telefono_principal),
-            fecha_nacimiento = COALESCE(EXCLUDED.fecha_nacimiento, personas.fecha_nacimiento),
-            genero = COALESCE(EXCLUDED.genero, personas.genero),
-            etnia = COALESCE(EXCLUDED.etnia, personas.etnia),
-            nivel_educativo = COALESCE(EXCLUDED.nivel_educativo, personas.nivel_educativo),
-            discapacidad = COALESCE(EXCLUDED.discapacidad, personas.discapacidad),
-            nacionalidad_id = COALESCE(EXCLUDED.nacionalidad_id, personas.nacionalidad_id),
-            provincia_id = COALESCE(EXCLUDED.provincia_id, personas.provincia_id),
-            canton_id = COALESCE(EXCLUDED.canton_id, personas.canton_id),
-            parroquia_id = COALESCE(EXCLUDED.parroquia_id, personas.parroquia_id),
-            sector = COALESCE(EXCLUDED.sector, personas.sector),
-            datos_extra = personas.datos_extra || EXCLUDED.datos_extra,
-            updated_at = now()
+        ON CONFLICT (cedula) DO NOTHING
         RETURNING id
         """,
         (
@@ -255,6 +343,11 @@ def registrar_inscripcion_publica(
             Jsonb({"frontend": raw_data}),
         ),
     ).fetchone()
+    if not persona:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una persona registrada con esta cedula. Contacta a soporte para actualizar tus datos.",
+        )
     persona_id = int(persona["id"])
 
     for tipo, valor in (("correo", payload.correo), ("telefono", telefono), ("whatsapp", telefono)):
@@ -282,7 +375,7 @@ def registrar_inscripcion_publica(
             campaign["curso_id"],
             campaign["curso_version_id"],
             campaign["id"],
-            datetime.utcnow(),
+            now,
             payload.actividad,
             payload.institucion,
             f"Inscripcion publica desde campana {campaign['nombre']}",

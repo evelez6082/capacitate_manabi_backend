@@ -1,137 +1,105 @@
-# Backend FastAPI
+# API de Capacítate Manabí
 
-Backend inicial para la super BD de inscripciones, Moodle, seguimiento, aprobaciones y diplomas.
+API FastAPI para autenticación, inscripción, seguimiento académico, aprobaciones y diplomas.
 
 ## Requisitos
 
-- PostgreSQL corriendo.
-- La BD migrada con `outputs/super_bd/migrar_datos.py`.
-- Python 3.11+.
+- Python 3.13.5 (registrado en `.python-version`).
+- PostgreSQL 16 con `schema_final.sql` aplicado.
+- El repositorio `capacitate_manabi_fullbd` para crear o actualizar la base.
 
-## Instalacion
+## Desarrollo local
+
+En PowerShell:
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.lock.txt
+Copy-Item .env.example .env
+python -m uvicorn app.main:app --reload --port 8000
+```
+
+En macOS o Linux:
 
 ```bash
-cd /Users/elize/Documents/Codex/2026-07-28/que/outputs/backend_fastapi
-python3 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements-dev.lock.txt
 cp .env.example .env
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-Edita `.env` y coloca la clave real de PostgreSQL.
+Edita `.env` antes de iniciar. `DATABASE_URL` debe apuntar a la instancia preparada y
+`AUTH_SECRET_KEY` debe ser una cadena aleatoria; nunca reutilices el valor de ejemplo en
+un despliegue real.
 
-## Correo de confirmacion
+Los archivos `requirements*.txt` declaran dependencias directas; los archivos
+`requirements*.lock.txt` fijan también las transitivas y son los usados para instalar.
 
-El backend puede enviar un correo automatico cuando una persona completa la preinscripcion publica.
+Servicios locales:
 
-En `.env`, configura SMTP:
+- API: <http://localhost:8000>
+- OpenAPI: <http://localhost:8000/docs>
+- Salud: <http://localhost:8000/health>
+
+## Variables de entorno
+
+`.env.example` contiene todas las opciones admitidas. Las principales son:
+
+| Variable | Propósito |
+|---|---|
+| `DATABASE_URL` | Conexión PostgreSQL de la API. |
+| `AUTH_SECRET_KEY` | Firma de tokens y desafíos; debe ser secreta y única por entorno. |
+| `CORS_ORIGINS` | Lista JSON de orígenes permitidos. |
+| `CLIENT_IP_HEADER` | Encabezado de IP, solo detrás de un proxy confiable que lo reemplace. |
+| `SMTP_*` | Envío opcional de confirmaciones. |
+| `RATE_LIMIT_*` | Límites de inscripción por IP, identidad y correo. |
+
+Si SMTP está deshabilitado o falla, la inscripción se conserva y la respuesta indica
+`correo_enviado: false`.
+
+## Seguridad de rutas
+
+Las únicas rutas anónimas son `GET /health`, `POST /api/auth/login` y `/api/public/*`.
+Las demás exigen `Authorization: Bearer <token>` y validan roles. La inscripción pública
+solo crea identidades nuevas: una cédula existente produce `409 Conflict` y no modifica
+datos personales.
+
+El formulario público requiere desafío firmado de un solo uso, tiempo mínimo, campo
+señuelo y límites persistentes. Las tablas necesarias forman parte de `schema_final.sql`.
+
+## Pruebas
 
 ```bash
-SMTP_ENABLED=true
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=tu_correo@gmail.com
-SMTP_PASSWORD=tu_app_password
-SMTP_FROM_EMAIL=tu_correo@gmail.com
-SMTP_FROM_NAME=Capacitate Manabi
-SMTP_USE_TLS=true
-SMTP_USE_SSL=false
+python -m unittest discover -s tests -v
 ```
 
-Para Gmail se recomienda usar una clave de aplicacion. Si `SMTP_ENABLED=false` o el servidor SMTP falla, la preinscripcion se guarda igual y la respuesta retorna `correo_enviado: false`.
+La suite usa el cliente HTTP de FastAPI y una base determinista simulada; no accede a
+datos reales.
 
-Si tu proveedor usa SSL directo, normalmente la configuracion cambia a:
+## Primer usuario administrativo
+
+Con la base inicializada, crea el primer usuario sin exponer la contraseña en el historial
+del terminal:
 
 ```bash
-SMTP_PORT=465
-SMTP_USE_TLS=false
-SMTP_USE_SSL=true
+python scripts/create_admin_user.py --email admin@example.org --name "Administrador" --role admin
 ```
 
-## Ejecutar
+El comando solicita la contraseña sin mostrarla. También admite la variable temporal
+`CAPACITATE_ADMIN_PASSWORD` para automatización desde un gestor de secretos.
+
+## Imagen de despliegue
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+docker build -t capacitate-manabi-api .
+docker run --rm -p 8000:8000 --env-file .env capacitate-manabi-api
 ```
 
-Abre:
+La imagen ejecuta la aplicación como usuario sin privilegios. Para levantar el sistema
+completo en desarrollo, usa `compose.yaml` del repositorio `capacitate_manabi_fullbd`.
 
-- API: http://localhost:8000
-- Docs: http://localhost:8000/docs
-- Health: http://localhost:8000/health
-
-## Endpoints iniciales
-
-- `GET /health`
-- `GET /api/resumen`
-- `GET /api/personas?q=texto`
-- `GET /api/personas/{cedula}`
-- `GET /api/personas/{cedula}/trazabilidad`
-- `GET /api/personas/{cedula}/estado`
-- `GET /api/diplomas?q=texto`
-- `GET /api/reportes/aprobados-sin-diploma`
-- `GET /api/reportes/aprobados-sin-solicitud-diploma`
-- `GET /api/reportes/aprobados-solicitados-sin-diploma`
-- `GET /api/reportes/inscritos-sin-aprobar`
-- `GET /api/reportes/estudiantes-para-seguimiento`
-- `GET /api/reportes/personas-multiples-versiones`
-- `GET /api/catalogos/provincias`
-- `GET /api/catalogos/cantones?provincia_id=1`
-- `GET /api/catalogos/parroquias?canton_id=1`
-- `GET /api/catalogos/nacionalidades`
-- `GET /api/campanas-inscripcion`
-- `POST /api/campanas-inscripcion`
-- `GET /api/campanas-inscripcion/{campana_id}/inscripciones`
-- `GET /api/usuarios/roles`
-- `GET /api/usuarios`
-- `GET /api/public/campanas/{slug_publico}`
-- `POST /api/public/campanas/{slug_publico}/inscripciones`
-
-## Ejemplo de campana
-
-```bash
-curl -X POST http://localhost:8000/api/campanas-inscripcion \
-  -H "Content-Type: application/json" \
-  -d '{
-    "codigo": "liderazgo-espam-001-2026",
-    "nombre": "Curso de Liderazgo ESPAM 001-2026",
-    "organizacion_origen": "ESPAM"
-  }'
-```
-
-La respuesta incluye `slug_publico` y `token_publico`, que luego serviran para construir el link publico de inscripcion.
-
-## Integracion con frontend React
-
-El formulario publico debe enviar los datos a:
-
-```text
-POST /api/public/campanas/{slug_publico}/inscripciones
-```
-
-Ejemplo local:
-
-```bash
-curl -X POST http://localhost:8000/api/public/campanas/liderazgo-espam-001-2026/inscripciones \
-  -H "Content-Type: application/json" \
-  -d '{
-    "cedula": "1234567890",
-    "fechaNac": "1990-01-01",
-    "nombres": "Ana",
-    "apellidos": "Alcivar",
-    "correo": "ana@example.com",
-    "celular": "0999999999",
-    "provincia": "Manabi",
-    "canton": "Portoviejo",
-    "parroquia": "Parroquia urbana",
-    "barrio": "Centro",
-    "actividad": "Estudio",
-    "institucion": "ESPAM",
-    "autoidentificacion": "Mestizo/a",
-    "genero": "Mujer",
-    "nacionalidad": "Ecuatoriana",
-    "discapacidad": "No",
-    "educacion": "Tercer nivel",
-    "acepto": true
-  }'
-```
+En producción, usa un gestor de secretos, termina TLS en un proxy confiable, restringe
+la red de PostgreSQL y ejecuta las migraciones antes de cambiar el tráfico a la nueva
+versión.

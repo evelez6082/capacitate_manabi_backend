@@ -13,7 +13,11 @@ from psycopg import Connection
 from app.db import fetch_all, fetch_one, get_connection
 from app.security import require_roles
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_roles("admin", "supervisor"))],
+)
 
 CANTON_COORDS = {
     "24 de mayo": (-1.2798, -80.4182),

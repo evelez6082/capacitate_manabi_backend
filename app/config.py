@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     auth_secret_key: str = "change-this-secret-in-production"
     auth_token_expire_minutes: int = 720
+    public_form_min_seconds: int = 3
+    public_form_max_seconds: int = 1800
+    rate_limit_ip_attempts: int = 10
+    rate_limit_ip_window_seconds: int = 900
+    rate_limit_identity_attempts: int = 3
+    rate_limit_identity_window_seconds: int = 3600
+    rate_limit_email_attempts: int = 3
+    rate_limit_email_window_seconds: int = 3600
+    client_ip_header: str | None = None
     smtp_enabled: bool = False
     smtp_host: str | None = None
     smtp_port: int = 587

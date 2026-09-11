@@ -2,8 +2,13 @@ from fastapi import APIRouter, Depends, Query
 from psycopg import Connection
 
 from app.db import fetch_all, get_connection
+from app.security import require_roles
 
-router = APIRouter(prefix="/api/reportes", tags=["reportes"])
+router = APIRouter(
+    prefix="/api/reportes",
+    tags=["reportes"],
+    dependencies=[Depends(require_roles("admin", "supervisor", "operador_inscripciones", "operador_diplomas"))],
+)
 
 
 def limited_view(conn: Connection, view_name: str, limit: int, offset: int) -> dict:

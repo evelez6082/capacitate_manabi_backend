@@ -2,8 +2,13 @@ from fastapi import APIRouter, Depends, Query
 from psycopg import Connection
 
 from app.db import fetch_all, get_connection
+from app.security import require_roles
 
-router = APIRouter(prefix="/api/diplomas", tags=["diplomas"])
+router = APIRouter(
+    prefix="/api/diplomas",
+    tags=["diplomas"],
+    dependencies=[Depends(require_roles("admin", "supervisor", "operador_diplomas"))],
+)
 
 
 @router.get("")
